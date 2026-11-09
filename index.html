@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Glimmerfield</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#0b1620;font-family:system-ui,-apple-system,sans-serif;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas{display:block}
+.ui{position:fixed;color:#fff;pointer-events:none;text-shadow:0 1px 4px #000}
+#hud{top:14px;left:14px;font-size:15px;line-height:1.55}
+#dex{top:14px;right:14px;background:rgba(0,0,0,.45);border-radius:10px;padding:8px 12px;font-size:13px;line-height:1.6;min-width:150px;text-shadow:none}
+#msg{left:50%;top:36%;transform:translate(-50%,-50%);font-size:20px;font-weight:700;white-space:nowrap;opacity:0;transition:opacity .3s}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;color:#fff;background:linear-gradient(#1d3b52,#0b1620)}
+#start h1{margin:0;font-size:40px;letter-spacing:3px}
+#start p{margin:0;max-width:360px;line-height:1.5;opacity:.85}
+#play{margin-top:10px;font-size:20px;padding:14px 44px;border:0;border-radius:30px;background:#7de3c4;color:#0b1620;font-weight:700;cursor:pointer}
+#joy{position:fixed;left:22px;bottom:22px;width:140px;height:140px;border-radius:50%;background:rgba(255,255,255,.12);border:2px solid rgba(255,255,255,.3);display:none}
+#knob{position:absolute;left:50%;top:50%;width:56px;height:56px;margin:-28px 0 0 -28px;border-radius:50%;background:rgba(255,255,255,.4)}
+#throw{position:fixed;right:26px;bottom:34px;width:88px;height:88px;border-radius:50%;border:2px solid rgba(255,255,255,.5);background:rgba(125,227,196,.35);color:#fff;font-size:16px;font-weight:700;display:none}
+</style>
+</head>
+<body>
+<div id="hud" class="ui"></div>
+<div id="dex" class="ui"></div>
+<div id="msg" class="ui"></div>
+<div id="joy"><div id="knob"></div></div>
+<button id="throw">THROW</button>
+<div id="start">
+  <h1>GLIMMERFIELD</h1>
+  <p>Explore a wide open world, catch original creatures with glimmer orbs, and fill your field guide.</p>
+  <p style="font-size:14px">Keyboard: WASD or arrows to move, Space to throw, drag to look.<br>Phone: left pad to move, drag the screen to look, tap THROW.</p>
+  <button id="play">Play</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const hudEl = $('hud'), dexEl = $('dex'), msgEl = $('msg');
+
+const SIZE = 400, WORLD = 180;
+
+// ---------- Original creature species ----------
+const SPECIES = [
+  {name:'Glimmo',    rarity:1, w:3, body:0x7fe7ff, accent:0xffffff, size:1.0,  shape:'blob', fly:false, speed:2.4},
+  {name:'Emberpup',  rarity:1, w:3, body:0xff9a4d, accent:0x7a2e12, size:1.05, shape:'pup',  fly:false, speed:3.2},
+  {name:'Mossling',  rarity:2, w:2, body:0x8fd672, accent:0x2f6b3a, size:1.25, shape:'moss', fly:false, speed:1.8},
+  {name:'Frostwisp', rarity:2, w:2, body:0xd6f2ff, accent:0x4f9cff, size:0.9,  shape:'wisp', fly:true,  speed:2.8},
+  {name:'Voltmoth',  rarity:3, w:1, body:0xffe45c, accent:0x6a4cff, size:1.0,  shape:'wisp', fly:true,  speed:3.6}
+];
+const CATCH = {1:0.7, 2:0.5, 3:0.3};
+const POOL = []; SPECIES.forEach(s => { for (let i = 0; i < s.w; i++) POOL.push(s); });
+const pickSpecies = () => POOL[Math.floor(Math.random() * POOL.length)];
+
+// ---------- Save (field guide persists on this device) ----------
+let dex = {};
+try { dex = JSON.parse(localStorage.getItem('glimmerfield-dex')) || {}; } catch (e) {}
+function saveDex() { try { localStorage.setItem('glimmerfield-dex', JSON.stringify(dex)); } catch (e) {} }
+
+// ---------- Renderer and scene ----------
+const renderer = new THREE.WebGLRenderer({antialias: true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+
+const SKY_DAY = new THREE.Color(0x9fd8ff), SKY_NIGHT = new THREE.Color(0x111c36), SKY_DUSK = new THREE.Color(0xffa36b);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color();
+scene.fog = new THREE.Fog(new THREE.Color(), 90, 280);
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 700);
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x4a6b3a, 0.6);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 1);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+const sc = sun.shadow.camera;
+sc.left = -50; sc.right = 50; sc.top = 50; sc.bottom = -50; sc.near = 1; sc.far = 300;
+sc.updateProjectionMatrix();
+sun.shadow.bias = -0.0008;
+scene.add(sun);
+scene.add(sun.target);
+
+// ---------- Terrain ----------
+function hash(x, y) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function heightAt(x, z) {
+  let h = 0, a = 1, f = 0.011, t = 0;
+  for (let i = 0; i < 5; i++) { h += vnoise(x * f + 31.7, z * f - 12.3) * a; t += a; a *= 0.5; f *= 2.03; }
+  h /= t;
+  const d = Math.max(Math.abs(x), Math.abs(z)) / (SIZE * 0.5);
+  h -= Math.pow(d, 3) * 0.3;
+  return (h - 0.38) * 48;
+}
+
+const geo = new THREE.PlaneGeometry(SIZE, SIZE, 170, 170).rotateX(-Math.PI / 2);
+const P = geo.attributes.position;
+const colors = new Float32Array(P.count * 3);
+const tc = new THREE.Color();
+for (let i = 0; i < P.count; i++) {
+  const x = P.getX(i), z = P.getZ(i), h = heightAt(x, z);
+  P.setY(i, h);
+  const base = h < -0.6 ? 0x2b5f7a : h < 1.6 ? 0xd9c58c : h < 15 ? 0x5ea84f : h < 19 ? 0x7d766a : 0xeef4f8;
+  tc.setHex(base).multiplyScalar(0.9 + 0.2 * hash(Math.round(x * 2), Math.round(z * 2)));
+  colors[i * 3] = tc.r; colors[i * 3 + 1] = tc.g; colors[i * 3 + 2] = tc.b;
+}
+geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geo.computeVertexNormals();
+const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({vertexColors: true}));
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+const water = new THREE.Mesh(
+  new THREE.PlaneGeometry(SIZE * 1.5, SIZE * 1.5).rotateX(-Math.PI / 2),
+  new THREE.MeshLambertMaterial({color: 0x3f9fd8, transparent: true, opacity: 0.8})
+);
+scene.add(water);
+
+// Trees and rocks
+const trunkG = new THREE.CylinderGeometry(0.35, 0.5, 2.6, 6);
+const leafG = new THREE.ConeGeometry(2.4, 5.5, 7);
+const rockG = new THREE.DodecahedronGeometry(1.2, 0);
+const trunkM = new THREE.MeshLambertMaterial({color: 0x6b4a2b});
+const leafMs = [0x2f7d3a, 0x3c9446, 0x2a6b34].map(c => new THREE.MeshLambertMaterial({color: c}));
+const rockM = new THREE.MeshLambertMaterial({color: 0x8a8478});
+function addProp(x, z) {
+  const h = heightAt(x, z);
+  if (h < 1) return;
+  const g = new THREE.Group();
+  if (Math.random() < 0.8) {
+    const t = new THREE.Mesh(trunkG, trunkM); t.position.y = 1.3; g.add(t);
+    const l = new THREE.Mesh(leafG, leafMs[Math.floor(Math.random() * 3)]); l.position.y = 4.8; g.add(l);
+    g.scale.setScalar(0.8 + Math.random() * 0.6);
+  } else {
+    const r = new THREE.Mesh(rockG, rockM);
+    r.position.y = 0.6; r.rotation.set(Math.random() * 3, Math.random() * 3, 0);
+    r.scale.setScalar(0.8 + Math.random()); g.add(r);
+  }
+  g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  g.position.set(x, h, z);
+  g.rotation.y = Math.random() * 6.28;
+  scene.add(g);
+}
+for (let i = 0; i < 160; i++) addProp((Math.random() - 0.5) * SIZE * 0.85, (Math.random() - 0.5) * SIZE * 0.85);
+
+// ---------- Player ----------
+const player = {pos: new THREE.Vector3(), yaw: 0, pitch: 0.4, orbs: 10, caught: 0, walk: 0};
+const avatar = new THREE.Group();
+const pBody = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.6, 1.4, 10), new THREE.MeshLambertMaterial({color: 0x2a6fdb}));
+pBody.position.y = 1.1;
+const pHead = new THREE.Mesh(new THREE.SphereGeometry(0.45, 12, 10), new THREE.MeshLambertMaterial({color: 0xffd7b0}));
+pHead.position.y = 2.2;
+const pHat = new THREE.Mesh(new THREE.ConeGeometry(0.5, 0.6, 10), new THREE.MeshLambertMaterial({color: 0xff5b7a}));
+pHat.position.y = 2.75;
+avatar.add(pBody, pHead, pHat);
+avatar.traverse(o => { if (o.isMesh) o.castShadow = true; });
+scene.add(avatar);
+
+function randomLand(minH, minFrom) {
+  for (let i = 0; i < 60; i++) {
+    const x = (Math.random() - 0.5) * WORLD * 2, z = (Math.random() - 0.5) * WORLD * 2;
+    if (heightAt(x, z) > minH && Math.hypot(x - player.pos.x, z - player.pos.z) > minFrom) return [x, z];
+  }
+  return [20, 20];
+}
+{
+  let sx = 0, sz = 0;
+  for (let i = 0; i < 300; i++) {
+    const x = (Math.random() - 0.5) * 60, z = (Math.random() - 0.5) * 60;
+    if (heightAt(x, z) > 3) { sx = x; sz = z; break; }
+  }
+  player.pos.set(sx, heightAt(sx, sz), sz);
+}
+
+// ---------- Creatures (procedural models) ----------
+function buildCreature(sp) {
+  const g = new THREE.Group();
+  const bodyM = new THREE.MeshLambertMaterial({color: sp.body});
+  const accM = new THREE.MeshLambertMaterial({color: sp.accent});
+  const scl = {blob: [1, 1, 1], pup: [1.1, 0.85, 1.5], moss: [1.1, 0.95, 1.1], wisp: [1, 1, 1]}[sp.shape];
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), bodyM);
+  body.scale.set(scl[0], scl[1], scl[2]);
+  g.add(body);
+  const white = new THREE.MeshBasicMaterial({color: 0xffffff}), black = new THREE.MeshBasicMaterial({color: 0x111111});
+  for (const s of [-1, 1]) {
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 8), white);
+    e.position.set(0.4 * scl[0] * s, 0.25 * scl[1], 0.9 * scl[2]); g.add(e);
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 6), black);
+    p.position.set(0.4 * scl[0] * s, 0.25 * scl[1], 1.05 * scl[2]); g.add(p);
+  }
+  const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) => {
+    const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.set(rx, ry, rz); g.add(m);
+  };
+  if (sp.shape === 'blob') {
+    add(new THREE.ConeGeometry(0.25, 0.9, 6), accM, -0.5, 1.0, 0, 0, 0, 0.4);
+    add(new THREE.ConeGeometry(0.25, 0.9, 6), accM, 0.5, 1.0, 0, 0, 0, -0.4);
+  } else if (sp.shape === 'pup') {
+    for (const [x, z] of [[-0.6, 0.9], [0.6, 0.9], [-0.6, -0.9], [0.6, -0.9]])
+      add(new THREE.CylinderGeometry(0.18, 0.15, 0.9, 6), bodyM, x, -0.8, z);
+    add(new THREE.ConeGeometry(0.3, 1.1, 6), accM, 0, 0.6, -1.7, -1.1, 0, 0);
+    add(new THREE.ConeGeometry(0.22, 0.7, 5), accM, -0.45, 1.05, 0.8);
+    add(new THREE.ConeGeometry(0.22, 0.7, 5), accM, 0.45, 1.05, 0.8);
+  } else if (sp.shape === 'moss') {
+    for (let i = 0; i < 3; i++)
+      add(new THREE.ConeGeometry(0.5, 1.3, 5), accM, Math.cos(i * 2.1) * 0.5, 1.3, Math.sin(i * 2.1) * 0.5, Math.sin(i) * 0.4, 0, Math.cos(i) * 0.4);
+  } else {
+    add(new THREE.ConeGeometry(0.35, 1.6, 6), accM, 0, 0, -1.5, -Math.PI / 2, 0, 0);
+    for (const s of [-1, 1]) add(new THREE.BoxGeometry(1.8, 0.08, 0.9), accM, 1.0 * s, 0.3, -0.1, 0, 0, -0.3 * s);
+  }
+  g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  const bb = new THREE.Box3().setFromObject(g);
+  g.children.forEach(ch => { ch.position.y -= bb.min.y; });
+  return g;
+}
+
+const creatures = [];
+function spawnCreature(sp, x, z) {
+  const g = buildCreature(sp);
+  g.scale.setScalar(sp.size);
+  g.userData = {sp, home: {x, z}, tx: x, tz: z, wait: 0, fear: 0, t: Math.random() * 10,
+                alt: sp.fly ? 2.5 + Math.random() * 2 : 0};
+  g.position.set(x, heightAt(x, z), z);
+  scene.add(g);
+  creatures.push(g);
+}
+
+function updateCreatures(dt) {
+  for (const c of creatures) {
+    const u = c.userData, sp = u.sp;
+    u.t += dt; u.fear = Math.max(0, u.fear - dt);
+    const dx = c.position.x - player.pos.x, dz = c.position.z - player.pos.z, d = Math.hypot(dx, dz);
+    let speed = sp.speed;
+    if (d < 7 || u.fear > 0) {
+      const k = 16 / Math.max(d, 1);
+      u.tx = c.position.x + dx * k; u.tz = c.position.z + dz * k;
+      speed *= 2.2; u.wait = 0;
+    } else if (u.wait <= 0) {
+      for (let i = 0; i < 8; i++) {
+        const a = Math.random() * 6.283, r = 3 + Math.random() * 12;
+        const x = u.home.x + Math.cos(a) * r, z = u.home.z + Math.sin(a) * r;
+        if (heightAt(x, z) > 0.8) { u.tx = x; u.tz = z; break; }
+      }
+      u.wait = 2 + Math.random() * 3;
+    }
+    u.wait -= dt;
+    const mx = u.tx - c.position.x, mz = u.tz - c.position.z, md = Math.hypot(mx, mz);
+    if (md > 0.4) {
+      const step = Math.min(speed * dt, md);
+      const nx = c.position.x + mx / md * step, nz = c.position.z + mz / md * step;
+      if (sp.fly || heightAt(nx, nz) > -0.5) { c.position.x = nx; c.position.z = nz; }
+      c.rotation.y = Math.atan2(mx, mz);
+    }
+    const ground = heightAt(c.position.x, c.position.z);
+    if (sp.fly) c.position.y = ground + u.alt + Math.sin(u.t * 2.5) * 0.5;
+    else c.position.y = ground + (md > 0.4 ? Math.abs(Math.sin(u.t * 9)) * 0.15 : 0);
+  }
+}
+
+function randomCreatureSpawn() {
+  const [x, z] = randomLand(2, 25);
+  spawnCreature(pickSpecies(), x, z);
+}
+
+// ---------- Glimmer crystals (orb pickups) ----------
+const crystalG = new THREE.OctahedronGeometry(0.5), crystalM = new THREE.MeshBasicMaterial({color: 0x9ff7ff});
+const crystals = [];
+function spawnCrystal() {
+  const [x, z] = randomLand(1.5, 0);
+  const m = new THREE.Mesh(crystalG, crystalM);
+  m.userData.base = heightAt(x, z) + 1.6;
+  m.position.set(x, m.userData.base, z);
+  scene.add(m);
+  crystals.push(m);
+}
+
+// ---------- Orb throws and sparks ----------
+const orbG = new THREE.SphereGeometry(0.35, 10, 8), orbM = new THREE.MeshBasicMaterial({color: 0xbff8ff});
+const shots = [];
+const sparkG = new THREE.SphereGeometry(0.14, 6, 4);
+const sparks = [];
+
+function throwOrb() {
+  if (player.orbs <= 0) { showMsg('Out of orbs. Collect glimmer crystals!'); return; }
+  player.orbs--;
+  const m = new THREE.Mesh(orbG, orbM);
+  m.position.set(player.pos.x, player.pos.y + 2.4, player.pos.z);
+  scene.add(m);
+  shots.push({m, v: new THREE.Vector3(-Math.sin(player.yaw) * 24, 11, -Math.cos(player.yaw) * 24), life: 4});
+  updateHud();
+}
+
+function burst(x, y, z, color, n) {
+  for (let i = 0; i < n; i++) {
+    const m = new THREE.Mesh(sparkG, new THREE.MeshBasicMaterial({color}));
+    m.position.set(x, y, z); scene.add(m);
+    sparks.push({m, v: new THREE.Vector3((Math.random() - 0.5) * 10, Math.random() * 9, (Math.random() - 0.5) * 10), life: 1});
+  }
+}
+
+function tryCapture(c) {
+  const sp = c.userData.sp;
+  if (Math.random() < CATCH[sp.rarity]) {
+    const first = !dex[sp.name];
+    dex[sp.name] = (dex[sp.name] || 0) + 1;
+    saveDex();
+    player.caught++;
+    if (first) { player.orbs += 3; showMsg(`New! ${sp.name} recorded. +3 orbs`); }
+    else showMsg(`Caught ${sp.name}!`);
+    burst(c.position.x, c.position.y + sp.size, c.position.z, sp.body, 26);
+    scene.remove(c);
+    creatures.splice(creatures.indexOf(c), 1);
+    setTimeout(randomCreatureSpawn, 9000);
+  } else {
+    c.userData.fear = 4;
+    showMsg(`${sp.name} broke free!`);
+  }
+  updateHud();
+}
+
+function updateShots(dt) {
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const s = shots[i];
+    s.v.y -= 22 * dt;
+    s.m.position.addScaledVector(s.v, dt);
+    s.life -= dt;
+    const p = s.m.position, gh = Math.max(heightAt(p.x, p.z), 0);
+    let done = false;
+    for (const c of creatures) {
+      const sz = c.userData.sp.size;
+      const dist = Math.hypot(c.position.x - p.x, c.position.y + sz - p.y, c.position.z - p.z);
+      if (dist < 1.8 * sz + 0.3) { tryCapture(c); done = true; break; }
+    }
+    if (!done && (p.y < gh + 0.2 || s.life <= 0)) {
+      done = true;
+      if (p.y < gh + 0.2) showMsg('Missed!');
+    }
+    if (done) { scene.remove(s.m); shots.splice(i, 1); }
+  }
+}
+
+function updateSparks(dt) {
+  for (let i = sparks.length - 1; i >= 0; i--) {
+    const s = sparks[i];
+    s.life -= dt;
+    s.v.y -= 14 * dt;
+    s.m.position.addScaledVector(s.v, dt);
+    s.m.scale.setScalar(Math.max(s.life, 0.05));
+    if (s.life <= 0) { scene.remove(s.m); sparks.splice(i, 1); }
+  }
+}
+
+// ---------- Day and night ----------
+let timeOfDay = 0.2;
+const DAY_SECONDS = 240;
+function updateSky(dt) {
+  timeOfDay = (timeOfDay + dt / DAY_SECONDS) % 1;
+  const ang = timeOfDay * Math.PI * 2, el = Math.sin(ang);
+  const dayF = clamp(el * 1.8 + 0.12, 0, 1);
+  const dusk = clamp(1 - Math.abs(el) * 6, 0, 1);
+  const sky = scene.background;
+  sky.copy(SKY_NIGHT).lerp(SKY_DAY, dayF).lerp(SKY_DUSK, dusk * 0.7);
+  scene.fog.color.copy(sky);
+  sun.intensity = 0.15 + 0.95 * dayF;
+  hemi.intensity = 0.35 + 0.45 * dayF;
+  const dir = new THREE.Vector3(Math.cos(ang) * 0.8, el, 0.45).normalize();
+  sun.position.copy(player.pos).addScaledVector(dir, 140);
+  sun.target.position.copy(player.pos);
+}
+
+// ---------- Input ----------
+const keys = {};
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if (k === ' ' && !e.repeat) { e.preventDefault(); throwOrb(); }
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+let look = null;
+renderer.domElement.addEventListener('pointerdown', e => { look = {id: e.pointerId, x: e.clientX, y: e.clientY}; });
+addEventListener('pointermove', e => {
+  if (look && e.pointerId === look.id) {
+    player.yaw -= (e.clientX - look.x) * 0.008;
+    player.pitch = clamp(player.pitch + (e.clientY - look.y) * 0.004, 0.15, 1.25);
+    look.x = e.clientX; look.y = e.clientY;
+  }
+});
+addEventListener('pointerup', e => { if (look && e.pointerId === look.id) look = null; });
+
+const joy = {x: 0, y: 0};
+const joyEl = $('joy'), knob = $('knob');
+let joyId = null, joyC = {x: 0, y: 0};
+function moveJoy(e) {
+  const R = 50;
+  let dx = e.clientX - joyC.x, dy = e.clientY - joyC.y;
+  const d = Math.hypot(dx, dy), k = d > R ? R / d : 1;
+  dx *= k; dy *= k;
+  joy.x = dx / R; joy.y = -dy / R;
+  knob.style.transform = `translate(${dx}px,${dy}px)`;
+}
+joyEl.addEventListener('pointerdown', e => {
+  joyId = e.pointerId; joyEl.setPointerCapture(e.pointerId);
+  const r = joyEl.getBoundingClientRect();
+  joyC = {x: r.left + r.width / 2, y: r.top + r.height / 2};
+  moveJoy(e);
+});
+joyEl.addEventListener('pointermove', e => { if (e.pointerId === joyId) moveJoy(e); });
+function endJoy(e) {
+  if (e.pointerId !== joyId) return;
+  joyId = null; joy.x = 0; joy.y = 0; knob.style.transform = '';
+}
+joyEl.addEventListener('pointerup', endJoy);
+joyEl.addEventListener('pointercancel', endJoy);
+$('throw').addEventListener('pointerdown', e => { e.preventDefault(); throwOrb(); });
+
+$('play').onclick = () => {
+  $('start').style.display = 'none';
+  if (matchMedia('(pointer:coarse)').matches) {
+    joyEl.style.display = 'block';
+    $('throw').style.display = 'block';
+  }
+};
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- Player movement and camera ----------
+function updatePlayer(dt) {
+  const k = (...n) => n.some(x => keys[x]);
+  let ix = (k('d', 'arrowright') ? 1 : 0) - (k('a', 'arrowleft') ? 1 : 0) + joy.x;
+  let iz = (k('w', 'arrowup') ? 1 : 0) - (k('s', 'arrowdown') ? 1 : 0) + joy.y;
+  const L = Math.hypot(ix, iz);
+  if (L > 1) { ix /= L; iz /= L; }
+  const s = Math.sin(player.yaw), c = Math.cos(player.yaw);
+  const mx = -s * iz + c * ix, mz = -c * iz - s * ix;
+  const moving = Math.hypot(ix, iz) > 0.01;
+  if (moving) {
+    const speed = heightAt(player.pos.x, player.pos.z) < 0 ? 5 : 9;
+    const nx = clamp(player.pos.x + mx * speed * dt, -WORLD, WORLD);
+    const nz = clamp(player.pos.z + mz * speed * dt, -WORLD, WORLD);
+    if (heightAt(nx, nz) > -1.5) { player.pos.x = nx; player.pos.z = n
